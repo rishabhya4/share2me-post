@@ -1,0 +1,141 @@
+name: Publish uploaded image to Buffer
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_id:
+        description: "Upload identifier returned by upload endpoint"
+        required: true
+        type: string
+      post_text:
+        description: "Text content for the Buffer post"
+        required: true
+        type: string
+  repository_dispatch:
+    types: [publish_uploaded_image]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: buffer-publish-${{ github.event.client_payload.upload_id || inputs.upload_id }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate required configuration
+        env:
+          UPLOAD_ENDPOINT_BASE_URL: ${{ secrets.UPLOAD_ENDPOINT_BASE_URL }}
+          UPLOAD_ENDPOINT_TOKEN: ${{ secrets.UPLOAD_ENDPOINT_TOKEN }}
+          BUFFER_ACCESS_TOKEN: ${{ secrets.BUFFER_ACCESS_TOKEN }}
+          BUFFER_PROFILE_ID: ${{ secrets.BUFFER_PROFILE_ID }}
+        run: |
+          set -euo pipefail
+          for var_name in UPLOAD_ENDPOINT_BASE_URL UPLOAD_ENDPOINT_TOKEN BUFFER_ACCESS_TOKEN BUFFER_PROFILE_ID; do
+            if [ -z "${!var_name}" ]; then
+              echo "::error::Missing required secret: ${var_name}"
+              exit 1
+            fi
+          done
+
+      - uses: actions/checkout@v4
+
+      - name: Resolve and validate inputs
+        id: inputs
+        env:
+          DISPATCH_UPLOAD_ID: ${{ github.event.client_payload.upload_id }}
+          DISPATCH_POST_TEXT: ${{ github.event.client_payload.post_text }}
+          MANUAL_UPLOAD_ID: ${{ github.event.inputs.upload_id }}
+          MANUAL_POST_TEXT: ${{ github.event.inputs.post_text }}
+        run: |
+          set -euo pipefail
+          upload_id="${DISPATCH_UPLOAD_ID:-${MANUAL_UPLOAD_ID:-}}"
+          post_text="${DISPATCH_POST_TEXT:-${MANUAL_POST_TEXT:-}}"
+
+          if [ -z "$upload_id" ]; then
+            echo "::error::Missing upload_id in dispatch payload or workflow input"
+            exit 1
+          fi
+          if ! printf '%s' "$upload_id" | grep -Eq '^[a-f0-9]{64}\.(png|jpg|gif|webp)$'; then
+            echo "::error::upload_id format is invalid"
+            exit 1
+          fi
+          if [ -z "$post_text" ]; then
+            echo "::error::post_text is required"
+            exit 1
+          fi
+
+          echo "upload_id=$upload_id" >> "$GITHUB_OUTPUT"
+          {
+            echo 'post_text<<EOF'
+            echo "$post_text"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download uploaded image
+        env:
+          UPLOAD_ID: ${{ steps.inputs.outputs.upload_id }}
+          UPLOAD_ENDPOINT_BASE_URL: ${{ secrets.UPLOAD_ENDPOINT_BASE_URL }}
+          UPLOAD_ENDPOINT_TOKEN: ${{ secrets.UPLOAD_ENDPOINT_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p images/uploaded
+          curl -fsS --retry 3 \
+            -H "X-Upload-Token: ${UPLOAD_ENDPOINT_TOKEN}" \
+            "${UPLOAD_ENDPOINT_BASE_URL%/}/upload/${UPLOAD_ID}" \
+            -o "images/uploaded/${UPLOAD_ID}"
+          test -s "images/uploaded/${UPLOAD_ID}"
+
+      - name: Commit uploaded image
+        env:
+          UPLOAD_ID: ${{ steps.inputs.outputs.upload_id }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "images/uploaded/${UPLOAD_ID}"
+          if git diff --cached --quiet; then
+            echo "Image already committed; nothing to push"
+          else
+            git commit -m "Add uploaded image ${UPLOAD_ID}"
+            git push
+          fi
+
+      - name: Publish to Buffer
+        env:
+          BUFFER_ACCESS_TOKEN: ${{ secrets.BUFFER_ACCESS_TOKEN }}
+          BUFFER_PROFILE_ID: ${{ secrets.BUFFER_PROFILE_ID }}
+          POST_TEXT: ${{ steps.inputs.outputs.post_text }}
+          UPLOAD_ID: ${{ steps.inputs.outputs.upload_id }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          IMAGE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/images/uploaded/${UPLOAD_ID}"
+
+          http_code=$(curl -sS -o /tmp/buffer-response.json -w "%{http_code}" \
+            -X POST "https://api.bufferapp.com/1/updates/create.json" \
+            --data-urlencode "access_token=${BUFFER_ACCESS_TOKEN}" \
+            --data-urlencode "profile_ids[]=${BUFFER_PROFILE_ID}" \
+            --data-urlencode "text=${POST_TEXT}" \
+            --data-urlencode "media[photo]=${IMAGE_URL}")
+
+          if [ "$http_code" -ne 200 ]; then
+            echo "::error::Buffer API request failed with HTTP ${http_code}"
+            cat /tmp/buffer-response.json
+            exit 1
+          fi
+
+          python - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path('/tmp/buffer-response.json').read_text())
+if payload.get('success') is not True:
+    print('::error::Buffer API reported a failure')
+    print(json.dumps(payload))
+    raise SystemExit(1)
+print('Buffer publish request accepted')
+PY
