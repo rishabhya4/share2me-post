@@ -11,7 +11,7 @@ from starlette.responses import JSONResponse
 
 app = FastAPI(title="share2me-post upload service")
 
-UPLOAD_ID_RE = re.compile(r"^[a-f0-9]{64}\.(png|jpg|gif|webp)$")
+UPLOAD_ID_RE = re.compile(r"^([a-f0-9]{64})\.(png|jpg|gif|webp)$")
 
 
 @app.exception_handler(RequestValidationError)
@@ -64,12 +64,17 @@ def _require_authorization(authorization: str | None, x_upload_token: str | None
 
 
 def _safe_upload_path(upload_id: str) -> Path:
-    if not UPLOAD_ID_RE.fullmatch(upload_id):
+    match = UPLOAD_ID_RE.fullmatch(upload_id)
+    if not match:
         raise HTTPException(status_code=400, detail="invalid upload identifier")
+    digest, extension = match.groups()
+    safe_filename = f"{digest}.{extension}"
     upload_dir = _upload_dir()
     upload_dir.mkdir(parents=True, exist_ok=True)
-    candidate = (upload_dir / upload_id).resolve()
-    if candidate.parent != upload_dir:
+    candidate = (upload_dir / safe_filename).resolve()
+    try:
+        candidate.relative_to(upload_dir)
+    except ValueError:
         raise HTTPException(status_code=400, detail="invalid upload identifier")
     return candidate
 
