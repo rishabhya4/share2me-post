@@ -1,0 +1,15 @@
+🚀 Share files instantly. Keep your data private.
+
+Tired of uploading files before you can share them?
+
+Share2Me makes it simple to send photos, videos, and large files directly peer-to-peer, with encrypted transfers and no cloud storage for transferred files.
+
+⚡ Direct transfers
+🔒 AES-GCM-256 encryption
+📱 Share via link or QR code
+
+Less upload hassle. More getting things done.
+
+Try it today: https://share2me.in
+
+#Share2Me #FileSharing #WebRTC #Privacy #Productivity
