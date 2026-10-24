@@ -1,0 +1,83 @@
+name: Publish Share2Me LinkedIn Image Post
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_path:
+        description: "Image path within images/"
+        required: true
+        type: string
+      caption_path:
+        description: "Caption path within captions/"
+        required: true
+        type: string
+      publish_now:
+        description: "Publish immediately; false queues through Buffer"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate inputs
+        shell: bash
+        env:
+          IMAGE_PATH: ${{ inputs.image_path }}
+          CAPTION_PATH: ${{ inputs.caption_path }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_PATH" == images/* ]] || { echo "image_path must be under images/"; exit 1; }
+          [[ "$CAPTION_PATH" == captions/* ]] || { echo "caption_path must be under captions/"; exit 1; }
+          test -f "$IMAGE_PATH"
+          test -s "$CAPTION_PATH"
+          case "${IMAGE_PATH##*.}" in png|PNG|jpg|JPG|jpeg|JPEG|webp|WEBP) ;; *) echo "Unsupported image extension"; exit 1;; esac
+
+      - name: Publish image and caption through Buffer GraphQL API
+        shell: bash
+        env:
+          BUFFER_API_KEY: ${{ secrets.BUFFER_API_KEY }}
+          BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
+          IMAGE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/${{ inputs.image_path }}
+          CAPTION_PATH: ${{ inputs.caption_path }}
+          PUBLISH_NOW: ${{ inputs.publish_now }}
+        run: |
+          set -euo pipefail
+          test -n "$BUFFER_API_KEY" || { echo "Missing BUFFER_API_KEY secret"; exit 1; }
+          test -n "$BUFFER_CHANNEL_ID" || { echo "Missing BUFFER_CHANNEL_ID secret"; exit 1; }
+          CAPTION="$(cat "$CAPTION_PATH")"
+          test -n "$CAPTION" || { echo "Caption file is empty"; exit 1; }
+
+          MODE="addToQueue"
+          if [[ "$PUBLISH_NOW" == "true" ]]; then MODE="shareNow"; fi
+
+          QUERY='mutation CreatePost($input: CreatePostInput!) {
+            createPost(input: $input) {
+              ... on PostActionSuccess { post { id text status } }
+              ... on MutationError { message }
+            }
+          }'
+          PAYLOAD="$(jq -n \
+            --arg query "$QUERY" \
+            --arg channelId "$BUFFER_CHANNEL_ID" \
+            --arg text "$CAPTION" \
+            --arg imageUrl "$IMAGE_URL" \
+            --arg mode "$MODE" \
+            '{query:$query,variables:{input:{channelId:$channelId,text:$text,mode:$mode,schedulingType:"automatic",assets:[{image:{url:$imageUrl,metadata:{altText:"Share2Me file sharing promotional image"}}}]}}}')"
+
+          RESPONSE="$(curl --fail-with-body --silent --show-error -X POST https://api.buffer.com \
+            -H "Authorization: Bearer $BUFFER_API_KEY" \
+            -H "Content-Type: application/json" \
+            --data "$PAYLOAD")"
+          echo "$RESPONSE" | jq .
+          if echo "$RESPONSE" | jq -e '.errors or .data.createPost.message' >/dev/null; then
+            echo "Buffer returned an API error"
+            exit 1
+          fi
+          echo "$RESPONSE" | jq -e '.data.createPost.post.id' >/dev/null || { echo "Buffer did not return a post ID"; exit 1; }
