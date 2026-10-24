@@ -91,16 +91,16 @@ jobs:
           code=$(curl -sS -o /tmp/buffer-response.json -w "%{http_code}" -X POST https://api.buffer.com -H "Authorization: Bearer ${BUFFER_ACCESS_TOKEN}" -H "Content-Type: application/json" --data-binary @/tmp/buffer-request.json)
           if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then echo "::error::Buffer API HTTP $code"; cat /tmp/buffer-response.json; exit 1; fi
           python - <<'PY'
-import json
-from pathlib import Path
-data = json.loads(Path("/tmp/buffer-response.json").read_text())
-if data.get("errors"):
-    print(json.dumps(data["errors"]))
-    raise SystemExit("Buffer GraphQL error")
-result = data.get("data", {}).get("createPost", {})
-post = result.get("post")
-if not post or not post.get("id") or not post.get("assets"):
-    print(json.dumps(result))
-    raise SystemExit("Buffer did not confirm an image post")
-print(f"Buffer accepted image post {post['id']} with {len(post['assets'])} asset(s); status={post.get('status', 'unknown')}")
-PY
+          import json
+          from pathlib import Path
+          data = json.loads(Path("/tmp/buffer-response.json").read_text())
+          if data.get("errors"):
+              print(json.dumps(data["errors"]))
+              raise SystemExit("Buffer GraphQL error")
+          result = data.get("data", {}).get("createPost", {})
+          post = result.get("post")
+          if not post or not post.get("id") or not post.get("assets"):
+              print(json.dumps(result))
+              raise SystemExit("Buffer did not confirm an image post")
+          print(f"Buffer accepted image post {post['id']} with {len(post['assets'])} asset(s); status={post.get('status', 'unknown')}")
+          PY
