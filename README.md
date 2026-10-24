@@ -67,7 +67,7 @@ Workflow file: `.github/workflows/publish-uploaded-image.yml`
 - `UPLOAD_ENDPOINT_BASE_URL` (for example `https://upload.example.com`)
 - `UPLOAD_ENDPOINT_TOKEN` (token to download uploads)
 - `BUFFER_ACCESS_TOKEN`
-- `BUFFER_PROFILE_ID`
+- `BUFFER_CHANNEL_ID` (the connected LinkedIn channel ID in Buffer)
 
 ### Trigger options
 
@@ -93,7 +93,7 @@ gh api repos/rishabhya4/share2me-post/dispatches \
 - Deterministic pathing prevents publishing arbitrary repository paths.
 - Concurrency group is based on `upload_id`, so duplicate runs for the same image serialize.
 - Missing secrets fail early with actionable errors.
-- Buffer publish call uses `https://api.bufferapp.com/1/updates/create.json` and repository secrets; credentials are never hard-coded.
+- Buffer publish call uses Buffer's channel-based GraphQL API at `https://api.buffer.com` with `channelId` (`BUFFER_CHANNEL_ID`) and repository secrets; credentials are never hard-coded.
 
 ## Retention and cleanup notes
 
