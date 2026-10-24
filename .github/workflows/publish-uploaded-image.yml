@@ -32,6 +32,10 @@ jobs:
           for key in UPLOAD_ENDPOINT_BASE_URL UPLOAD_ENDPOINT_TOKEN BUFFER_ACCESS_TOKEN BUFFER_CHANNEL_ID; do
             if [ -z "${!key}" ]; then echo "::error::Missing secret: $key"; exit 1; fi
           done
+          if ! printf '%s' "$UPLOAD_ENDPOINT_BASE_URL" | grep -Eq '^https://'; then
+            echo "::error::UPLOAD_ENDPOINT_BASE_URL must start with https://"
+            exit 1
+          fi
       - uses: actions/checkout@v4
       - name: Validate inputs
         id: inputs
@@ -41,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! printf '%s' "$UPLOAD_ID" | grep -Eq '^[a-f0-9]{64}\.(png|jpg|gif|webp)$'; then echo "::error::Invalid upload_id"; exit 1; fi
-          if [ -z "$POST_TEXT" ]; then echo "::error::post_text is required"; exit 1; fi
+          if ! printf '%s' "$POST_TEXT" | grep -q '[^[:space:]]'; then echo "::error::post_text is required"; exit 1; fi
           echo "upload_id=$UPLOAD_ID" >> "$GITHUB_OUTPUT"
           {
             echo 'post_text<<POST_TEXT_EOF'
@@ -56,10 +60,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p images/uploaded
-          curl -fsS --retry 3 -H "X-Upload-Token: ${UPLOAD_ENDPOINT_TOKEN}" "${UPLOAD_ENDPOINT_BASE_URL%/}/upload/${UPLOAD_ID}" -o "images/uploaded/${UPLOAD_ID}"
+          curl -fsS --proto '=https' --tlsv1.2 --retry 3 -H "X-Upload-Token: ${UPLOAD_ENDPOINT_TOKEN}" "${UPLOAD_ENDPOINT_BASE_URL%/}/upload/${UPLOAD_ID}" -o "images/uploaded/${UPLOAD_ID}"
           test -s "images/uploaded/${UPLOAD_ID}"
           file --mime-type "images/uploaded/${UPLOAD_ID}" | grep -Eq 'image/(png|jpeg|gif|webp)'
       - name: Commit image to public repository
+        id: commit_image
         env:
           UPLOAD_ID: ${{ steps.inputs.outputs.upload_id }}
         run: |
@@ -71,6 +76,7 @@ jobs:
             git commit -m "Add uploaded image ${UPLOAD_ID}"
             git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
+          echo "image_commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Publish image through Buffer GraphQL API
         env:
           BUFFER_ACCESS_TOKEN: ${{ secrets.BUFFER_ACCESS_TOKEN }}
@@ -78,16 +84,23 @@ jobs:
           POST_TEXT: ${{ steps.inputs.outputs.post_text }}
           UPLOAD_ID: ${{ steps.inputs.outputs.upload_id }}
           REPO: ${{ github.repository }}
-          BRANCH: ${{ github.ref_name }}
+          IMAGE_COMMIT_SHA: ${{ steps.commit_image.outputs.image_commit_sha }}
         run: |
           set -euo pipefail
-          IMAGE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/images/uploaded/${UPLOAD_ID}"
-          code=$(curl -sS -L -o /dev/null -w "%{http_code}" "$IMAGE_URL")
+          IMAGE_URL="https://raw.githubusercontent.com/${REPO}/${IMAGE_COMMIT_SHA}/images/uploaded/${UPLOAD_ID}"
+          code=""
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            code=$(curl -sS -L -o /dev/null -w "%{http_code}" "$IMAGE_URL")
+            if [ "$code" = "200" ]; then
+              break
+            fi
+            sleep 5
+          done
           if [ "$code" != "200" ]; then echo "::error::Public image URL returned HTTP $code"; exit 1; fi
           jq -n --arg text "$POST_TEXT" --arg channelId "$BUFFER_CHANNEL_ID" --arg imageUrl "$IMAGE_URL" '{
             query: "mutation PublishImage($input: CreatePostInput!) { createPost(input: $input) { ... on PostActionSuccess { post { id status assets { id mimeType } } } ... on MutationError { message } } }",
             variables: {input: {text: $text, channelId: $channelId, schedulingType: "automatic", mode: "shareNow", assets: [{image: {url: $imageUrl, metadata: {altText: "Share2Me promotional image"}}}]}}
           }' > /tmp/buffer-request.json
-          code=$(curl -sS -o /tmp/buffer-response.json -w "%{http_code}" -X POST https://api.buffer.com -H "Authorization: Bearer ${BUFFER_ACCESS_TOKEN}" -H "Content-Type: application/json" --data-binary @/tmp/buffer-request.json)
+          code=$(curl -sS -o /tmp/buffer-response.json -w "%{http_code}" -X POST https://api.buffer.com -H "Authorization: ******" -H "Content-Type: application/json" --data-binary @/tmp/buffer-request.json)
           if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then echo "::error::Buffer API HTTP $code"; cat /tmp/buffer-response.json; exit 1; fi
           python -c 'import json, pathlib, sys; d=json.loads(pathlib.Path("/tmp/buffer-response.json").read_text()); e=d.get("errors"); e and (print(json.dumps(e)), sys.exit("Buffer GraphQL error")); r=d.get("data",{}).get("createPost",{}); p=r.get("post"); (not p or not p.get("id") or not p.get("assets")) and (print(json.dumps(r)), sys.exit("Buffer did not confirm an image post")); print("Buffer accepted image post {} with {} asset(s); status={}".format(p["id"],len(p["assets"]),p.get("status","unknown")))'
